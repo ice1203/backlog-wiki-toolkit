@@ -34,7 +34,6 @@ Backlog WikiとGitHubリポジトリ間の双方向同期を実現するツー�
 
 ### プロジェクト固有で作成が必要
 - `.env` - Backlog APIキー
-- `wiki/backlog-settings.json` - プロジェクト設定
 - `.mcp.json` - MCP設定（Claude Code使用時）
 
 ## 🎯 セットアップ手順
