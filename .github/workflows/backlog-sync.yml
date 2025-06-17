@@ -1,0 +1,138 @@
+# ⚠️ 重要: 本ワークフローは参考例です
+# 実際の使用前に以下を確認してください：
+# 1. GitHub Secretsの設定（BACKLOG_API_KEY）
+# 2. プロジェクト固有の設定値の変更
+# 3. 十分なテスト実施
+# 4. バックアップの取得
+
+name: Backlog Wiki Sync
+
+# 本ワークフローはデフォルトで無効化されています
+# 使用する場合は以下のコメントアウトを解除し、適切に設定してください
+
+# on:
+#   # 手動実行のみ（推奨）
+#   workflow_dispatch:
+#   
+#   # または、PRマージ時の自動実行
+#   # pull_request:
+#   #   types: [closed]
+#   #   paths:
+#   #     - 'wiki/**/*.md'
+
+on: []  # 完全無効化
+
+jobs:
+  sync-to-backlog:
+    # if: github.event.pull_request.merged == true  # PRマージ時のみ実行（workflow_dispatchでは不要）
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 全履歴を取得してPRの変更を正しく検出するため
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Detect changed wiki files
+        id: changes
+        uses: tj-actions/changed-files@v46
+        with:
+          files: 'wiki/**/*.md'
+          quotepath: false
+          safe_output: false
+
+      - name: Extract Wiki information from files
+        id: wiki_info
+        if: steps.changes.outputs.any_changed == 'true'
+        run: |
+          echo "Extracting wiki information from changed files..."
+          python3 scripts/extract_wiki_info.py ${{ steps.changes.outputs.all_changed_files }}
+
+      - name: Sync to Backlog
+        if: steps.changes.outputs.any_changed == 'true'
+        env:
+          BACKLOG_API_KEY: ${{ secrets.BACKLOG_API_KEY }}
+        run: |
+          echo "Starting Backlog sync process..."
+          
+          success_count=0
+          error_count=0
+          error_details=""
+          
+          # extract_wiki_info.pyが出力したwiki_updates.jsonを読み取り
+          if [ -f "wiki_updates.json" ]; then
+            while IFS= read -r line; do
+              wiki_id=$(echo "$line" | jq -r '.wiki_id')
+              wiki_name=$(echo "$line" | jq -r '.wiki_name')
+              file_path=$(echo "$line" | jq -r '.file_path')
+              
+              if [ "$wiki_id" != "null" ] && [ "$wiki_name" != "null" ]; then
+                echo "Updating Wiki ID: $wiki_id, Name: $wiki_name, File: $file_path"
+                
+                if python3 scripts/backlog_wiki_manager.py update "$wiki_id" "$wiki_name" "$file_path"; then
+                  echo "✅ Successfully updated: $file_path"
+                  success_count=$((success_count + 1))
+                else
+                  echo "❌ Failed to update: $file_path"
+                  error_count=$((error_count + 1))
+                  error_details="$error_details\n- $file_path (Wiki ID: $wiki_id)"
+                fi
+              else
+                echo "⚠️ Skipping $file_path - Wiki ID or name not found"
+                error_count=$((error_count + 1))
+                error_details="$error_details\n- $file_path (Wiki ID/名前が見つかりません)"
+              fi
+            done < wiki_updates.json
+          else
+            echo "❌ wiki_updates.json not found"
+            error_count=1
+            error_details="Wiki情報の抽出に失敗しました"
+          fi
+          
+          echo "=== Backlog Sync Results ==="
+          echo "Success: $success_count files"
+          echo "Errors: $error_count files"
+          
+          # 結果をGitHub環境変数に保存
+          echo "success_count=$success_count" >> $GITHUB_ENV
+          echo "error_count=$error_count" >> $GITHUB_ENV
+          echo "error_details<<EOF" >> $GITHUB_ENV
+          echo -e "$error_details" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Comment on PR with results
+        if: steps.changes.outputs.any_changed == 'true'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const successCount = process.env.success_count;
+            const errorCount = process.env.error_count;
+            const errorDetails = process.env.error_details;
+            
+            let comment = `## 🔄 Backlog Wiki 同期結果\n\n`;
+            comment += `- ✅ 成功: ${successCount} ファイル\n`;
+            comment += `- ❌ エラー: ${errorCount} ファイル\n\n`;
+            
+            if (errorCount > 0) {
+              comment += `### エラー詳細\n${errorDetails}\n\n`;
+              comment += `⚠️ エラーが発生したファイルは手動でBacklogに反映してください。\n`;
+            } else {
+              comment += `🎉 すべてのファイルが正常にBacklogに反映されました！\n`;
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.payload.pull_request.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
